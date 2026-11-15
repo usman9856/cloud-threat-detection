@@ -1,0 +1,101 @@
+name: security-checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">=1.6"
+      # -backend=false: no state or AWS access needed for validate
+      - run: terraform init -backend=false
+      - run: terraform fmt -check -recursive
+      - run: terraform validate
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          # Lab exceptions, grouped by reason. Production hardening that costs money or adds setup
+          # without changing what the lab proves. Bucket is disposable (force_destroy), trail is
+          # single-region by design, log group keeps 14 days, Lambda is not in a VPC (no NAT cost).
+          skip_check: CKV_AWS_35,CKV_AWS_252,CKV_AWS_67,CKV2_AWS_10,CKV_AWS_158,CKV_AWS_338,CKV_AWS_117,CKV_AWS_115,CKV_AWS_173,CKV_AWS_50,CKV_AWS_116,CKV_AWS_272,CKV_AWS_21,CKV_AWS_18,CKV_AWS_144,CKV_AWS_145,CKV2_AWS_62
+          soft_fail: false
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full clone so gitleaks can scan every commit in the PR/push range
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        run: semgrep scan --config p/default --error --metrics=off lambda
+
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OSV-Scanner dependency scan
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            ghcr.io/google/osv-scanner:v2.3.8 \
+            scan source --recursive .
+
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [terraform-validate, unit-test, iac-scan, secret-scan, sast, sca]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Fail unless every scan job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "A required job did not succeed."
+              exit 1
+            fi
+          done
