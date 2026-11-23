@@ -1,0 +1,13 @@
+{
+  "name": "cloud-threat-detection",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cloudtrail": "^3.1161.0",
+    "@aws-sdk/client-sns": "^3.1161.0",
+    "aws-sdk-client-mock": "^4.1.0"
+  }
+}
